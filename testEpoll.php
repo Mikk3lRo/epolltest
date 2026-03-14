@@ -104,9 +104,23 @@ function runWorker(mixed $serverSock, string $host, int $port): void
 
     $stop = false;
     pcntl_signal(SIGTERM, function () use (&$stop) { $stop = true; });
-    pcntl_signal(SIGINT,  function () use (&$stop) { $stop = true; });
+    pcntl_signal(SIGINT, SIG_IGN);
 
     $base    = new EventBase();
+
+    $shutdownTimer = new Event(
+        $base,
+        -1,
+        Event::TIMEOUT | Event::PERSIST,
+        function () use (&$stop, $base, $pid) {
+            if ($stop) {
+                fwrite(STDOUT, "[worker {$pid}] SIGTERM received, stopping event loop...\n");
+                $base->stop();
+            }
+        }
+    );
+    $shutdownTimer->add(0.2); // 200ms tick
+
     $clients = [];
     $nextId  = 0;
 
@@ -188,13 +202,8 @@ function runWorker(mixed $serverSock, string $host, int $port): void
 
     fwrite(STDOUT, "[worker {$pid}] ready on {$host}:{$port}\n");
 
-    // LOOP_ONCE tick loop: each call processes one batch of ready events and
-    // returns to PHP userland, where the $stop flag set by the signal handler
-    // is visible.  The small usleep keeps CPU usage near-zero when idle.
-    while (!$stop) {
-        $base->loop(EventBase::LOOP_ONCE);
-        usleep(1_000); // 1 ms
-    }
+    $base->loop();
+    fwrite(STDOUT, "[worker {$pid}] shutting down\n");
 
     // Clean shutdown: stop accepting, close all open client connections.
     $acceptEvent->del();
